@@ -1,32 +1,76 @@
-/* 
-	ITS-FMS protobuf interface specification
-	
-	Change log:
-	2.2 21-aug-2023 	Reformatted comments
-	2.1 24-apr-2023 	Added gps_quality to LocationUpdateEvent + added heading to Location
-	               		Extended priorityContainer with requested direction/lane
-	2.0 24-mar-2023 	Released alongside v2.0 of functional-technical documentation
-	1.2 02-mar-2023 	Added details for overtaking bans
-	1.1 11-feb-2023 	Additional info for variable message signs + Added
-                 		comments from original documentation what containers should be filled
-                 		depending on the its_event_code
-	1.0 12-jul-2022 	TirePressure status changed to enum
-						Additional timestamp for location_update with device time.
-						Field numbering without gaps
-						Valid values of enum should not start at zero
-	0.8 13-may-2022 	Moved Movement from LaneInfo to TrafficLightStateInformation
-	0.7 14-apr-2022 	Replaced FmsItsContainer by FmsItsMessage for errorMessage
-                 		and added error for big time difference and way to return invalid proto message
-                 		Added support for multiple anomalies in a signal TirePressure message
-	0.6 12-apr-2022 	Added encapsulation message FmsItsMessage
-						Moved vehicle related info to FmsItsMessage and removed elsewhere
-                 		Added error message
-	0.5 28-mar-2022 	Changed type of coordinates in Location message to lat/lon pairs
-		                Extended RoadConfigurationStatus + added max_speed to RoadConfiguration
-	0.4 10-mar-2022 	Major update:
-                 		Use google.protobuf.TImestamp i.s.o. uint64
-                 		Added LocationUpdateEvent, MeasurementType
-                 		Added straight arrow to trafficlight
+/*
+    ITS-FMS Interface Specification
+
+    The ITS-FMS Interface is defined as a standard for communication between logistic IT-suppliers (FMS) 
+    wanting to integrate Intelligent Transport Systems services and ITS cloud service providers (CSP) 
+    that offer the required services. These services consist of useful real-time traffic and infrastructure 
+    events that are relevant on the current route of the truck.
+
+    Communication Types:
+    - Static data (vehicle and route): JSON over HTTPS (REST)
+    - Dynamic data (ITS events, positions, control messages): Protocol Buffers over WebSocket (WSS)
+
+    Authentication:
+    - Bearer tokens for authentication 
+    - SSL (TLS) for in-flight data encryption
+    - API keys required for both REST and WebSocket communication
+
+    Interface Flow:
+    1. Announce vehicle with REST API call
+    2. Announce route with REST API call (Only required when iVRIPriorityEnabled is true)
+    3. Open 1 websocket connection over WSS for each vehicle
+    4. Start communication by sending first location update
+    5. Respond to timestamp requests and send location updates per requirements
+    6. Receive realtime event messages from CSP
+
+    Note: Connection closes after 5 minutes of inactivity
+
+    Protocol Compatibility:
+    - Protocol Buffers version 3 (proto3) required
+    - All message fields use proto3 field presence
+    - Default values must not be relied upon for business logic
+    - Unknown fields must be preserved during message handling
+    - Breaking changes require major version increment
+    
+    Message Validation:
+    - All required fields must be present and valid
+    - Enums must use defined values only
+    - Numeric ranges must be respected:
+      - Latitude: -90 to +90
+      - Longitude: -180 to +180
+      - Heading: 0 to 360
+      - GPS quality: >0
+      - Sample intervals: 1-60
+    - Timestamps must be UTC
+    - UUIDs must be valid RFC 4122 format
+
+    Change log:
+    2.3 02-mar-2025	Extensive commenting
+    2.2 21-aug-2023 	Reformatted comments
+    2.1 24-apr-2023 	Added gps_quality to LocationUpdateEvent + added heading to Location
+                   		Extended priorityContainer with requested direction/lane
+    2.0 24-mar-2023 	Released alongside v2.0 of functional-technical documentation
+    1.2 02-mar-2023 	Added details for overtaking bans
+    1.1 11-feb-2023 	Additional info for variable message signs + Added
+                   		comments from original documentation what containers should be filled
+                   		depending on the its_event_code
+    1.0 12-jul-2022 	TirePressure status changed to enum
+                        Additional timestamp for location_update with device time.
+                        Field numbering without gaps
+                        Valid values of enum should not start at zero
+    0.8 13-may-2022 	Moved Movement from LaneInfo to TrafficLightStateInformation
+    0.7 14-apr-2022 	Replaced FmsItsContainer by FmsItsMessage for errorMessage
+                   		and added error for big time difference and way to return invalid proto message
+                   		Added support for multiple anomalies in a signal TirePressure message
+    0.6 12-apr-2022 	Added encapsulation message FmsItsMessage
+                        Moved vehicle related info to FmsItsMessage and removed elsewhere
+                   		Added error message
+    0.5 28-mar-2022 	Changed type of coordinates in Location message to lat/lon pairs
+                        Extended RoadConfigurationStatus + added max_speed to RoadConfiguration
+    0.4 10-mar-2022 	Major update:
+                   		Use google.protobuf.TImestamp i.s.o. uint64
+                   		Added LocationUpdateEvent, MeasurementType
+                   		Added straight arrow to trafficlight
 */
 
 syntax = "proto3";
@@ -34,10 +78,20 @@ syntax = "proto3";
 package fmsitsinterface;
 
 option java_multiple_files = true;
+option go_package = "github.com/itsfms/proto;fmsitsinterface";
 
-// when used in this definition it is expected that UTC timestamps are provided
-import "google/protobuf/timestamp.proto";  
+// All timestamps in this interface must be provided in UTC (UTC+00:00)
+import "google/protobuf/timestamp.proto";
+import "google/api/annotations.proto";
 
+/* Message Types
+   Core message types used throughout the interface.
+   - MESSAGETYPE_UNKNOWN: Unknown or unspecified message type
+   - TIMESTAMP_MESSAGE: Time synchronization messages
+   - LOCATION_UPDATE: Vehicle position updates
+   - EVENT_MESSAGE: Contains both InfoContainer and ContentContainer for events
+   - ERROR_MESSAGE: Error notifications
+*/
 enum MessageType{
   MESSAGETYPE_UNKNOWN = 0;
   TIMESTAMP_MESSAGE = 1;
@@ -47,88 +101,234 @@ enum MessageType{
   ERROR_MESSAGE = 4;
 }
 
+/*
+ * FmsItsMessage - Root wrapper for all ITS-FMS communication
+ * 
+ * Message Flow:
+ * 1. Connection Establishment
+ *    - Vehicle announced via REST API
+ *    - Route announced if priority needed
+ *    - WebSocket connection opened
+ *
+ * 2. Regular Operation
+ *    Vehicle -> CSP:
+ *    - Location updates (0.2-1 Hz)
+ *    - Timestamp responses
+ *    
+ *    CSP -> Vehicle:
+ *    - Timestamp requests (~1/minute)
+ *    - Event notifications
+ *    - Frequency change requests
+ *    - Error messages
+ *
+ * 3. Connection Management
+ *    - Inactive after 5 minutes: connection closes
+ *    - Clock diff > 3s: error triggered
+ *    - Missing updates: error triggered
+ */
 message FmsItsMessage {
-  MessageType     message_type = 1;
-  string          vehicle_id = 2;
-  FmsItsContainer container = 3;
+    // Type of contained message
+    MessageType message_type = 1;
+    // Vehicle this message relates to
+    string vehicle_id = 2;
+    // Actual message content
+    FmsItsContainer container = 3;
 }
 
+/*
+ * Container for all ITS-FMS message content
+ * Acts as a wrapper for different message types:
+ * 1. Time Sync: Timestamp requests/responses
+ * 2. Events: Info and content containers
+ * 3. Location: Vehicle position updates
+ * 4. Errors: Problem notifications
+ *
+ * Only one container field should be populated per message
+ * based on the MessageType in FmsItsMessage
+ */
 message FmsItsContainer {
-  // Request/response message to check time synchronisation between 2 systems
-  TimestampMessage timestamp_message = 1;  
-  // CSP to Vehicle: General information about the message not related to the event itself.
-  InfoContainer info_container = 2;        
-  // CSP to Vehicle: More information about the content of the event.
-  ContentContainer content_container = 3;  
-  // Vehicle to CSP: container used to convey location updates
-  LocationUpdateEvent location_update = 4; 
-  // In case messages cannot be handled, this message is used to inform the original sender
-  ErrorMessage error_message = 5;          
+    // Time sync messages between CSP and FMS
+    TimestampMessage timestamp_message = 1;
+    // Event metadata from CSP to vehicle
+    InfoContainer info_container = 2;
+    // Event details from CSP to vehicle
+    ContentContainer content_container = 3;
+    // Position updates from vehicle to CSP
+    LocationUpdateEvent location_update = 4;
+    // Error notifications in either direction
+    ErrorMessage error_message = 5;
 }
 
-enum ErrorType{
-  ERRORTYPE_UNKNOWN = 0;
-  // an expected field is missing
-  MISSING_FIELD = 1;          
-  // an field has a invalid/unsupported value
-  INVALID_FIELD = 2;          
-  // the required information via the REST API was not provided
-  PRE_CONDITION_NOT_MET = 3;  
-  // locationUpdateEvents are not being received according to specification
-  DATA_RATE_ERROR = 4;        
-  // a timestamp response was not received within the expected timeframe
-  NO_TIMESTAMP_ANSWER = 5;    
-  // difference between clocks of FMS and CSP is too big
-  TIMEDIFF_TOO_BIG = 6;       
-  // proto message could not be decoded
-  INVALID_PROTO = 7;          
-}
-
+/*
+ * Error handling message
+ * Used when messages cannot be properly processed
+ * Common scenarios:
+ * - Missing required fields
+ * - Invalid field values
+ * - Preconditions not met (missing REST API data)
+ * - Location update timing issues
+ * - Time sync problems
+ * - Protocol buffer decoding failures
+ */
 message ErrorMessage {
-  ErrorType error_type = 1;
-  string error_message = 2;           // details of the error
-  string related_field = 3;           // if the error relates to a specific field, the name of the field is added
-  FmsItsMessage related_message = 4;  // the original input message the error is related to
-  bytes related_raw_message = 5;      // in case the original message could not be parsed, it is returned as raw byte array
+    // Type of error that occurred
+    ErrorType error_type = 1;
+    // Detailed error description
+    string error_message = 2;
+    // Name of problematic field if applicable
+    string related_field = 3;
+    // Original message that caused error
+    FmsItsMessage related_message = 4;
+    // Raw message bytes if parsing failed
+    bytes related_raw_message = 5;
 }
 
+/*
+ * Error type enumeration
+ * Categorizes different types of errors that can occur
+ * Helps determine appropriate error handling strategy
+ */
+enum ErrorType {
+    ERRORTYPE_UNKNOWN = 0;      // Unspecified error type
+    MISSING_FIELD = 1;          // Required field not provided
+    INVALID_FIELD = 2;          // Field value invalid/unsupported
+    PRE_CONDITION_NOT_MET = 3;  // Required setup step missing
+    DATA_RATE_ERROR = 4;        // Location updates not meeting timing requirements
+    NO_TIMESTAMP_ANSWER = 5;    // Time sync response not received in time
+    TIMEDIFF_TOO_BIG = 6;       // Clock difference exceeds 3 seconds
+    INVALID_PROTO = 7;          // Message couldn't be decoded
+}
+
+/*
+ * Error Handling and Recovery Procedures
+ * 
+ * Time Synchronization Errors:
+ * - NO_TIMESTAMP_ANSWER (5):
+ *   1. Response not received within 3s
+ *   2. CSP sends error notification
+ *   3. FMS should verify time sync and connectivity
+ *   4. Continue sending responses to new requests
+ *
+ * - TIMEDIFF_TOO_BIG (6):
+ *   1. Clock difference exceeds 3s
+ *   2. CSP sends error notification
+ *   3. FMS should resync system clock
+ *   4. CSP continues monitoring until resolved
+ *
+ * Location Update Errors:
+ * - DATA_RATE_ERROR (4):
+ *   1. Updates not meeting frequency requirements
+ *   2. CSP sends error notification
+ *   3. FMS should verify GPS functionality
+ *   4. Return to required update frequency
+ *
+ * Message Validation Errors:
+ * - MISSING_FIELD (1):
+ *   1. Required field absent
+ *   2. Receiver sends error with field name
+ *   3. Sender must resend with complete data
+ *
+ * - INVALID_FIELD (2):
+ *   1. Field value outside valid range
+ *   2. Receiver sends error with details
+ *   3. Sender must resend with valid value
+ *
+ * - INVALID_PROTO (7):
+ *   1. Message cannot be decoded
+ *   2. Raw message returned in error
+ *   3. Sender should verify protobuf encoding
+ *
+ * Setup/Precondition Errors:
+ * - PRE_CONDITION_NOT_MET (3):
+ *   1. Missing REST API registration/setup
+ *   2. CSP sends error notification
+ *   3. FMS must complete registration process
+ *   4. Retry operation after setup complete
+ */
+
+/*
+ * Time Synchronization
+ * Requirements and Process:
+ * 1. CSP sends timestamp request ~every minute
+ * 2. FMS must respond within 3 seconds
+ * 3. Clock difference must not exceed 3 seconds
+ * 4. Validation failures trigger error messages
+ *
+ * GPS Time Handling:
+ * - GPS provides highly accurate time
+ * - If GPS time differs from NTP time:
+ *   - Include device_date in LocationUpdateEvent
+ *   - CSP will validate and possibly use device time
+ *   - Only if within 1 second error margin
+ */
+
+/*
+ * Time synchronization message
+ * Used to maintain time alignment between CSP and FMS
+ * Message flow:
+ * 1. CSP sends with requestTransmission
+ * 2. FMS records reception time
+ * 3. FMS adds response time and sends back
+ * 4. CSP validates timing constraints
+ */
 message TimestampMessage {
-  google.protobuf.Timestamp request_transmission = 1;
-  google.protobuf.Timestamp request_reception = 2;
-  google.protobuf.Timestamp response_transmission = 3;
+    // When CSP initiated request (UTC)
+    google.protobuf.Timestamp request_transmission = 1;
+    // When FMS received request (UTC)
+    google.protobuf.Timestamp request_reception = 2;
+    // When FMS sent response (UTC)
+    google.protobuf.Timestamp response_transmission = 3;
 }
 
-enum MeasurementUnit{
-  UNKNOWN = 0;
+/*
+ * Units of measurement used throughout the interface
+ * Organized by measurement type:
+ * - Speed: 10-19 (km/h, m/s)
+ * - Mass: 20-29 (kg, lb)
+ * - Length: 30-39 (m, cm)
+ * - Time: 40-49 (ms, s, min, h)
+ * - Angle: 50-59 (degrees)
+ */
+enum MeasurementUnit {
+    // Default unknown state
+    UNKNOWN = 0;
 
-  // speed units
-  KILOMETERS_PER_HOUR = 10;
-  METERS_PER_SECOND = 11;
+    // Speed measurement units (10-19)
+    KILOMETERS_PER_HOUR = 10;  // Standard unit for vehicle speeds
+    METERS_PER_SECOND = 11;    // Alternative speed unit
 
-  // mass units
-  KILOGRAM = 20;
-  POUND = 21;
+    // Mass measurement units (20-29)
+    KILOGRAM = 20;             // Standard unit for weight measurements
+    POUND = 21;                // Alternative weight unit
 
-  // length / height units
-  METER = 30;
-  CENTIMETER = 31;
+    // Length/height units (30-39)
+    METER = 30;                // Standard unit for distances/heights
+    CENTIMETER = 31;           // Higher precision distance unit
 
-  // time units
-  MILLISECOND = 40;
-  SECOND = 41;
-  MINUTE = 42;
-  HOUR = 43;
+    // Time measurement units (40-49)
+    MILLISECOND = 40;          // High precision time intervals
+    SECOND = 41;               // Standard time interval unit
+    MINUTE = 42;               // Longer time intervals
+    HOUR = 43;                 // Extended time intervals
 
-  // heading / bearing units
-  DEGREES = 50;  // allowed range in degrees [0, 360>
+    // Heading/bearing units (50-59)
+    DEGREES = 50;              // Compass bearing, range [0, 360)
 }
 
+/*
+ * Base unit and value pair for measurements
+ * Used for speeds, weights, distances, and time values
+ * The unit field determines how to interpret the value
+ */
 message MeasurementType{
     int32 value = 1;
     MeasurementUnit unit = 2;
 }
 
-// General information about the message not related to the event itself.
+/*
+ * General information container for ITS events
+ * Contains metadata about the message source, versioning and timing
+ */
 message InfoContainer {
 
   string author = 1;     // The CSP that created the message.
@@ -147,114 +347,232 @@ message InfoContainer {
 
 // More information about the content of the event.
 message ContentContainer {
-
-  ItsEventCode its_event_code = 1;  // ITSEventCode is an integer referring to the usecase at hand.
-  EventInfo event_info = 2;         // container for event details
+    // Event type categorization code
+    ItsEventCode its_event_code = 1;
+    // Detailed event information
+    EventInfo event_info = 2;
 }
 
+/*
+ * EventInfo details for ITS events
+ * Contains location, static and dynamic metadata depending on event type
+ */
 message EventInfo {
-  string event_text = 1;                             // Textual representation of ITSEventCode.
-  Location location = 2;                             // container for location details, compliant with EPSG 4326
-  StaticEventMetadata static_event_metadata = 3;     // Contains other containers for static events.
-  DynamicEventMetadata dynamic_event_metadata = 4;   // Contains other containers for dynamic events, its_event_code EMERGENCY_VEHICLE_APPROACHING, ROAD_INSPECTOR or GHOST_DRIVER_WARNING
-
+    // Human-readable description of the event
+    string event_text = 1;
+    // Geographic location where event applies (EPSG:4326)
+    Location location = 2;
+    // Static event information (road config, weather, etc)
+    StaticEventMetadata static_event_metadata = 3;
+    // Dynamic event information for moving events (emergency vehicles, etc)
+    DynamicEventMetadata dynamic_event_metadata = 4;
 }
 
-message Point {
-  float latitude = 1;
-  float longitude = 2;
-}
-
+/*
+ * Location and coordinate information
+ * All coordinates use EPSG:4326 coordinate system (WGS84)
+ * Geometry types and rules:
+ * - Point: Single coordinate for precise locations 
+ * - LineString: Ordered points forming a path/route
+ * - Polygon: Closed shape (first point = last point)
+ *   Used for areas like:
+ *   - Dynamic sampling zones
+ *   - Weather effect areas
+ *   - Event impact regions
+ */
 message Location {
-  repeated Point coordinates = 1;     // list of coordinates to represent location of event or desired frequency zone.
-                                      // Can be polygon (2D array), linestring (2D array) or point (1D array) object. Coordinates are expressed in EPSG:4326
-  enum CoordinatesType {
-    UNKNOWN_COORDINATES_TYPE = 0;     // Unknown coordinates type
-    LINE_STRING = 1;                  // Line string
-    POINT = 2;                        // Point
-    POLYGON = 3;                      // Polygon
-  }
-  CoordinatesType coordinates_type = 2; // type of coordinates field
-  MeasurementType heading = 3;          // driving direction for which the event is relevant. If relevant for all directions, this field is unused
+    // List of points forming the geometry
+    repeated Point coordinates = 1;
+    
+    enum CoordinatesType {
+        UNKNOWN_COORDINATES_TYPE = 0;  // Type not specified
+        LINE_STRING = 1;              // Connected path/route
+        POINT = 2;                    // Single location
+        POLYGON = 3;                  // Closed area shape
+    }
+    // Geometry type formed by coordinates
+    CoordinatesType coordinates_type = 2;
+    // Bearing in degrees [0,360) that event applies to
+    // Omitted if event applies to all directions
+    MeasurementType heading = 3;
 }
 
+/*
+ * Geographic coordinate pair
+ * Uses EPSG:4326 coordinate system (WGS84)
+ * - Latitude range: -90 to +90
+ * - Longitude range: -180 to +180
+ * - Precision: At least 6 decimal places recommended
+ */
+message Point {
+    // Latitude in decimal degrees
+    float latitude = 1;
+    // Longitude in decimal degrees 
+    float longitude = 2;
+}
+
+/*
+ * Static metadata for ITS events
+ * Contains specialized containers based on event category:
+ *
+ * Weather Events (Category 2):
+ * - weather_conditions: Current conditions for WEATHER_CONDITIONS
+ *
+ * Road Events (Category 1):
+ * - road_configuration: Lane status for LANE_CONFIGURATION
+ * - speed_info: Limits for MAXIMUM_SPEED, ADVISORY_SPEED_LIMIT
+ * - overtaking_info: Rules for OVERTAKING_BAN
+ *
+ * Traffic Light Events (Category 3,4):
+ * - ivri_container: All traffic light related data
+ * - lane_info: Lane-specific configurations
+ *
+ * Sensor Events (Category 5):
+ * - sensor_info: Vehicle sensor measurements
+ */
 message StaticEventMetadata {
-  enum WeatherConditions {
-    UNKNOWN_WEATHER_CONDITION = 0;  // Unknown weather condition
-    HEAVY_RAIN = 1;                 // Heavy rain
-    SLIPPERY_ROAD = 2;              // Slippery Road (ice, oil, ...)
-    FOG = 3;                        // Fog
-    HEAVY_WIND = 4;                 // Heavy Wind
-    HEAVY_SNOWFALL = 5;             // Heavy Snowfall
-    HAIL = 6;                       // Hail
-  }
-  WeatherConditions weather_conditions = 1;     // indicating weather events, its_event_code WEATHER_CONDITIONS
-  RoadConfiguration road_configuration = 2;     // object indicating status of road lanes, its_event_code LANE_CONFIGURATION
-  SpeedInfo speed_info = 3;                     // object indicating maximum and optimal speed, its_event_code MAXIMUM_SPEED or ADVISORY_SPEED_LIMIT
-  IvriContainer ivri_container = 4;             // object as placeholder for various traffic light usecases, its_event_code TRAFFIC_LIGHT_STATUS, TRAFFIC_LIGHT_TIMING,  ADVISORY_SPEED, RAIL_CROSSING_STATUS
-  LaneInfo lane_info = 5;                       // object indicating the lane for which the event is applicable, its_event_code LANE_CONFIGURATION, TRAFFIC_LIGHT_STATUS, TRAFFIC_LIGHT_TIMING
-  SensorInfo sensor_info = 6;                   // object as placeholder for usecases from category 5, its_event_code TIRE_PRESSURE_GAUGE, ALTIMETER, WEIGHT, PARKING_OCCUPATION, PARKING_RESERVATION
-  OvertakingInfo overtaking_info = 7;           // object with details for an overtaking ban, its_event_code OVERTAKING_BAN
+    enum WeatherConditions {
+        UNKNOWN_WEATHER_CONDITION = 0;  // Status cannot be determined
+        HEAVY_RAIN = 1;                 // Severe rainfall affecting visibility/traction
+        SLIPPERY_ROAD = 2;              // Reduced traction (ice, oil, etc)
+        FOG = 3;                        // Reduced visibility conditions
+        HEAVY_WIND = 4;                 // Strong winds affecting stability
+        HEAVY_SNOWFALL = 5;             // Snow affecting visibility/traction
+        HAIL = 6;                       // Hail affecting visibility/safety
+    }
+    // Current weather condition (WEATHER_CONDITIONS)
+    WeatherConditions weather_conditions = 1;
+    // Lane/road status (LANE_CONFIGURATION)
+    RoadConfiguration road_configuration = 2;
+    // Speed limits and advisories (MAXIMUM_SPEED, ADVISORY_SPEED_LIMIT)
+    SpeedInfo speed_info = 3;
+    // Traffic light information (all Category 3,4 events)
+    IvriContainer ivri_container = 4;
+    // Lane-specific details (with road_configuration or ivri_container)
+    LaneInfo lane_info = 5;
+    // Sensor measurements (Category 5 events)
+    SensorInfo sensor_info = 6;
+    // Overtaking restrictions (OVERTAKING_BAN)
+    OvertakingInfo overtaking_info = 7;
 }
 
+/*
+ * Road configuration and status information
+ * Used for variable message signs and lane status
+ * Status can include:
+ * - Lane open/closed states
+ * - Merge directions
+ * - Speed limit changes
+ * - Vehicle type restrictions
+ */
 message RoadConfiguration {
-  enum RoadConfigStatus {
-    option allow_alias = true;
-    UNKNOWN_ROAD_CONFIG_STATUS = 0;    // Unknown Status
-    OPEN = 1;                          // Open: 'falling' green arrow
-    CLOSED = 2;                        // Closed for all traffic: red cross 
-    CLOSED_FOR_ALL_TRAFFIC = 2;        // Closed for all traffic
-    MERGE_RIGHT = 3;                   // verdrijfpijl naar rechts
-    MERGE_LEFT = 4;                    // verdrijfpijl naar links
-    END_OF_RESTRICTIONS = 5;           // verkeersbord F08
-    CLOSED_FOR_YOU = 6;                // You cannot use this lane for your type of vehicle
-    CHANGED_MAX_SPEED = 7;             // temporary change of the maximum speed (matrixborden)
-    BLANK = 8;                         // Variable message sign is blank / turned off
-  }
-  RoadConfigStatus road_config_status = 1;  // Status indicates state of lane defined in container laneInfo
-  MeasurementType max_speed = 2;            // optional field in case the status is CHANGED_MAX_SPEED
-  enum RoadConfigLocation {
-    UNKNOWN_LOCATION = 0;
-    LOCATION_DOWNSTREAM = 1;           // object located downstream relative to the vehicle
-    LOCATION_UPSTREAM = 2;             // object located upstream relative to the vehicle
-  }
-  RoadConfigLocation road_config_location = 3;
-  bool flashing = 4;                   // are flashing lights present
-  bool red_border = 5;                 // is a red border present
+    enum RoadConfigStatus {
+        option allow_alias = true;
+        UNKNOWN_ROAD_CONFIG_STATUS = 0;   // Status cannot be determined
+        OPEN = 1;                         // Lane open (green arrow)
+        CLOSED = 2;                       // Lane closed (red cross)
+        CLOSED_FOR_ALL_TRAFFIC = 2;       // Alias for CLOSED
+        MERGE_RIGHT = 3;                  // Lane ends, merge right
+        MERGE_LEFT = 4;                   // Lane ends, merge left
+        END_OF_RESTRICTIONS = 5;          // End of previous restrictions
+        CLOSED_FOR_YOU = 6;               // Closed for this vehicle type
+        CHANGED_MAX_SPEED = 7;            // Temporary speed limit change
+        BLANK = 8;                        // Sign is inactive/blank
+    }
+    // Current configuration state
+    RoadConfigStatus road_config_status = 1;
+    // New speed limit when status is CHANGED_MAX_SPEED
+    MeasurementType max_speed = 2;
+    
+    enum RoadConfigLocation {
+        UNKNOWN_LOCATION = 0;        // Location unknown
+        LOCATION_DOWNSTREAM = 1;     // Ahead of vehicle
+        LOCATION_UPSTREAM = 2;       // Behind vehicle
+    }
+    // Position relative to vehicle
+    RoadConfigLocation road_config_location = 3;
+    // Whether sign is in flashing mode
+    bool flashing = 4;
+    // Whether sign has red border
+    bool red_border = 5;
 }
 
-message OvertakingInfo{
-  enum ApplicableVehicleType {
-	  UNKNOWN_APPLICABLE_VEHICLE_TYPE = 0;
-	  ALL_MOTORIZED = 1;            // any kind of motorized vehicle
-	  HGV = 2;                      // all kinds of trucks
-	  AGRICULTURE = 3;              // agricultural vehicles like tractors
-	  MOPED = 4;
-  }
-  repeated ApplicableVehicleType applicable_for = 1;
-  repeated ApplicableVehicleType except_for = 2;
+/*
+ * Overtaking restriction information
+ * Defines which vehicle types:
+ * - Are subject to overtaking ban
+ * - Are exempt from overtaking ban
+ * Used with itsEventCode OVERTAKING_BAN
+ */
+message OvertakingInfo {
+    enum ApplicableVehicleType {
+        UNKNOWN_APPLICABLE_VEHICLE_TYPE = 0;  // Vehicle type unknown
+        ALL_MOTORIZED = 1;                    // All motor vehicles
+        HGV = 2;                             // Heavy goods vehicles only
+        AGRICULTURE = 3;                      // Agricultural vehicles
+        MOPED = 4;                           // Mopeds/scooters
+    }
+    // Vehicle types banned from overtaking
+    repeated ApplicableVehicleType applicable_for = 1;
+    // Vehicle types exempt from ban
+    repeated ApplicableVehicleType except_for = 2;
 }
 
+/*
+ * Speed limit and advisory information
+ * Used for both mandatory limits and recommended speeds
+ * Applicable for:
+ * - MAXIMUM_SPEED: Legal speed limits
+ * - ADVISORY_SPEED_LIMIT: Recommended speeds
+ * - CHANGED_MAX_SPEED: Temporary speed changes
+ */
 message SpeedInfo {
-  int32 maximum_speed_limit = 1;            // maximum speed limit, its_event_code MAXIMUM_SPEED
-  int32 optimal_speed = 2;                  // optimal speed, its_event_code ADVISORY_SPEED_LIMIT
-  MeasurementUnit speed_limit_unit = 3;     // units in which maximumSpeedLimit and optimalSpeed are expressed, , its_event_code MAXIMUM_SPEED or ADVISORY_SPEED_LIMIT
+    // Maximum permitted speed (mandatory limit)
+    int32 maximum_speed_limit = 1;
+    // Recommended speed for optimal traffic flow
+    int32 optimal_speed = 2;
+    // Unit for both speed values (typically km/h)
+    MeasurementUnit speed_limit_unit = 3;
 }
 
-// The IvriContainer is transmitted when a significant change occurs in the variables. Without change the message is transmitted every 10 seconds
+/*
+ * IvriContainer - Intelligent Traffic Light Information
+ * Used for traffic light related use cases. Transmitted:
+ * - When significant changes occur in variables
+ * - Every 10 seconds without changes as heartbeat
+ * - For use cases: TRAFFIC_LIGHT_STATUS, TRAFFIC_LIGHT_TIMING, ADVISORY_SPEED, RAIL_CROSSING_STATUS
+ */
 message IvriContainer {
-  PriorityContainer priority_container = 1;                             // object containing feedback on priority request, its_event_code PRIORITY
-  TrafficLightStateInformation traffic_light_state_information = 2;     // object containing information on traffic light states, its_event_code TRAFFIC_LIGHT_STATUS
-  TrafficLightTimingInformation traffic_light_timing_information = 3;   // object containing information on when traffic light state changes are expected, its_event_code TRAFFIC_LIGHT_TIMING
-  TrafficLightSpeedAdvice traffic_light_speed_advice = 4;               // object containing information on optimal speed to intersection, its_event_code ADVISORY_SPEED
+    // Priority request feedback (itsEventCode PRIORITY)
+    PriorityContainer priority_container = 1;
+    // Current traffic light states (itsEventCode TRAFFIC_LIGHT_STATUS)
+    TrafficLightStateInformation traffic_light_state_information = 2;
+    // Expected state change timing (itsEventCode TRAFFIC_LIGHT_TIMING)
+    TrafficLightTimingInformation traffic_light_timing_information = 3;
+    // Speed advice for optimal traffic flow (itsEventCode ADVISORY_SPEED)
+    TrafficLightSpeedAdvice traffic_light_speed_advice = 4;
 }
 
+/*
+ * Priority request information for traffic lights
+ * Used for priority status updates and requests (itsEventCode PRIORITY)
+ * Status flow: requested -> processing -> granted/rejected
+ * See full status list in documentation
+ */
 message PriorityContainer {
-  string status = 1;     // feedback on priority request, its_event_code PRIORITY
-  Maneuver maneuver = 2; // direction for which priority is requested
-  int32 lane_id = 3;     // lane for which priority is requested
+    // Priority request status (granted, rejected, processing, etc)
+    string status = 1;
+    // Direction(s) for which priority is requested
+    Maneuver maneuver = 2;
+    // Lane number for which priority is requested
+    int32 lane_id = 3;
 }
 
+/*
+ * Current traffic light state information
+ * Provides current state, arrow direction, and movement type
+ * Used with itsEventCode TRAFFIC_LIGHT_STATUS
+ */
 message TrafficLightStateInformation {
   enum CurrentState {
     UNKNOWN_TRAFFIC_LIGHT_STATE = 0;    // Unknown traffic light state
@@ -282,136 +600,281 @@ message TrafficLightStateInformation {
   Movement movement = 3;     // Indicating whether an arrow is needed or a simple round dot. Protected = obligation to show arrow; Permissive = round dot
 }
 
+/*
+ * Traffic light timing prediction information
+ * All timestamps are in UTC+00:00
+ * Used with itsEventCode TRAFFIC_LIGHT_TIMING
+ */
 message TrafficLightTimingInformation {
-  google.protobuf.Timestamp min_end_time = 1;     // The element minEndTime is used to convey the earliest time possible at which the phase could change, except when unpredictable events relating to a pre-emption or priority call disrupt a currently active timing plan. (UTC+00:00).
-  google.protobuf.Timestamp max_end_time = 2;     // The element MaxEndTime is used to convey the latest time possible which the phase could change, except when unpredictable events relating to a pre-emption or priority call come into play and disrupt a currently active timing plan. (UTC+00:00)"
-  google.protobuf.Timestamp likely_time = 3;     // The element likelyTime is used to convey the most likely time the phase changes. This occurs between MinEndTime and MaxEndTime and is only relevant for traffic-actuated control programs. (UTC+00:00).
-
+    // Earliest possible phase change time (excluding pre-emption/priority)
+    google.protobuf.Timestamp min_end_time = 1;
+    // Latest possible phase change time (excluding pre-emption/priority)
+    google.protobuf.Timestamp max_end_time = 2;
+    // Most likely phase change time (between min and max, for actuated signals)
+    google.protobuf.Timestamp likely_time = 3;
 }
 
+/*
+ * Speed advice for optimal traffic flow
+ * Can be quantitative (specific speed) or qualitative (speed up/slow down)
+ * Used with itsEventCode ADVISORY_SPEED
+ */
 message TrafficLightSpeedAdvice {
-  string advice = 1;         // advice on speed, can be quantitative (integer>0) ,or qualitative (one of: slow down,speed up or keep speed)
-  string advice_type = 2;    // type of advice can be Qualitative or Quantitative
+    // Speed advice value - either number or instruction
+    string advice = 1;
+    // Type of advice (Qualitative or Quantitative)
+    string advice_type = 2;
 }
 
+/*
+ * Lane-specific traffic information
+ * Describes lane configuration and permitted maneuvers
+ * Used with:
+ * - LANE_CONFIGURATION: Lane status changes
+ * - TRAFFIC_LIGHT_STATUS: Signal states per lane
+ * - TRAFFIC_LIGHT_TIMING: Timing predictions per lane
+ */
 message LaneInfo {
-  int32 max_lane_id = 1;             // total number of lanes at event location, its_event_code LANE_CONFIGURATION, TRAFFIC_LIGHT_STATUS
-  int32 lane_id = 2;                 // indicating the lane at which the event occurs (counting from left to right, starting at 1 till max_lane_id), its_event_code LANE_CONFIGURATION, TRAFFIC_LIGHT_STATUS
-  repeated Maneuver maneuvers = 3;   // The different maneuvers for which this traffic light gives info, its_event_code LANE_CONFIGURATION, TRAFFIC_LIGHT_STATUS
+    // Total number of lanes at this location
+    int32 max_lane_id = 1;
+    // Current lane number (1 to max_lane_id, left to right)
+    int32 lane_id = 2;
+    // Permitted movements for this lane
+    repeated Maneuver maneuvers = 3;
 }
 
+/*
+ * Traffic Movement Configuration
+ * Defines allowed movements and yield behavior
+ * Used in both:
+ * - Lane configuration (LANE_CONFIGURATION)
+ * - Traffic light status (TRAFFIC_LIGHT_STATUS)
+ *
+ * Version Compatibility:
+ * v2.0+: Added U_TURN direction
+ * v2.1+: Added UNSPECIFIED direction
+ */
 message Maneuver {
-  enum Direction {
-    UNKNOWN_DIRECTION = 0;    // Unknown direction
-    STRAIGHT = 1;             // Straight
-    LEFT = 2;                 // Left
-    RIGHT = 3;                // Right
-    U_TURN = 4;               // U-Turn
-    UNSPECIFIED = 5;          // Unspecified
-  }
-  repeated Direction direction = 1;  // the list contains integers indicating the possible directions from the traffic light
-  bool always_yield = 2;             // boolean value indicating whether the road user should always give priority to intersecting traffic (cfr. orange flashing light)
-
+    enum Direction {
+        UNKNOWN_DIRECTION = 0;    // Direction cannot be determined
+        STRAIGHT = 1;            // Straight ahead movement
+        LEFT = 2;                // Left turn movement
+        RIGHT = 3;               // Right turn movement
+        U_TURN = 4;              // U-turn movement
+        UNSPECIFIED = 5;         // Movement type not specified
+    }
+    // List of permitted directions for this maneuver
+    repeated Direction direction = 1;
+    // Whether traffic must always yield regardless of signals
+    bool always_yield = 2;
 }
 
+/*
+ * Container for various sensor data types (Category 5 events)
+ * Used for tire pressure, vehicle weight, and height measurements
+ */
 message SensorInfo {
-  TirePressure tire_pressure = 1;       // object containing information on tire pressures, its_event_code TIRE_PRESSURE_GAUGE
-  VehicleWeight vehicle_weight = 2;     // object containing information on vehicle weight, its_event_code WEIGHT
-  MeasurementType vehicle_height = 3;   // object containing information on vehicle height, its_event_code ALTIMETE
+    // Tire pressure status and anomalies (itsEventCode TIRE_PRESSURE_GAUGE)
+    TirePressure tire_pressure = 1;
+    // Vehicle weight per axle (itsEventCode WEIGHT)
+    VehicleWeight vehicle_weight = 2;
+    // Vehicle height measurement (itsEventCode ALTIMETER)
+    MeasurementType vehicle_height = 3;
 }
 
+/*
+ * Tire pressure monitoring information
+ * For unloaded/lightly loaded vehicles, OK status doesn't guarantee good pressure
+ * Used with itsEventCode TIRE_PRESSURE_GAUGE
+ */
 message TirePressure {
-  enum VehicleTirePressureStatus {
-    UNKNOWN_STATUS = 0;  // Unknown status
-    OK = 1;              // OK: all tires seem to be OK
-    NOK_SUSPECT = 2;     // Not OK: at least one tire is suspect and none seem to be flat
-    NOK_FLAT = 3;        // Not OK: at least one tire seems to be flat
-  }
-  VehicleTirePressureStatus status = 1;   // indicating overall status of tire pressure of the vehicle.
-  int32 axle_count = 2;                   // integer indicating total number of axles of the vehicle
-  repeated Anomalies anomalies = 3;       // object containing detailed information on pressure of every tire that is not OK
-
+    enum VehicleTirePressureStatus {
+        UNKNOWN_STATUS = 0;  // Status unknown
+        OK = 1;              // All tires appear to be at proper pressure
+        NOK_SUSPECT = 2;     // At least one tire suspect, none flat
+        NOK_FLAT = 3;        // At least one tire appears to be flat
+    }
+    // Overall tire pressure status of the vehicle
+    VehicleTirePressureStatus status = 1;
+    // Total number of vehicle axles
+    int32 axle_count = 2;
+    // List of tire anomalies (only for non-OK tires)
+    repeated Anomalies anomalies = 3;
 }
 
+/*
+ * Details about a specific tire pressure anomaly
+ * Each anomaly identifies the specific tire location and issue
+ */
 message Anomalies {
-  int32 axle = 1;             // indicating axle, counting starts from front of vehicle
-  enum Side {
-    UNKNOWN_SIDE = 0;         // Unknown side
-    LEFT = 1;                 // Left
-    RIGHT = 2;                // Right
-  }
-  Side side = 2;              // indicating side of axle
-  enum TireStatus {
-    UNKNOWN_STATUS = 0;       // Unknown measurement
-    FLAT = 1;                 // Flat
-    SUSPECT = 2;              // Suspect
-  }
-  TireStatus measurement = 3; // indicating state of tire
-
+    // Axle number (counting from front)
+    int32 axle = 1;
+    enum Side {
+        UNKNOWN_SIDE = 0;
+        LEFT = 1;
+        RIGHT = 2;
+    }
+    // Which side of the axle
+    Side side = 2;
+    enum TireStatus {
+        UNKNOWN_STATUS = 0;  // Measurement unknown
+        FLAT = 1;           // Tire appears to be flat
+        SUSPECT = 2;        // Tire pressure seems low
+    }
+    // Current tire condition
+    TireStatus measurement = 3;
 }
 
+/*
+ * Vehicle weight information
+ * Contains total axle count and per-axle measurements
+ * Used with itsEventCode WEIGHT
+ */
 message VehicleWeight {
-  int32 axle_count = 1;                                 // integer indicating total number of axles of the vehicle
-  repeated WeightMeasurements weight_measurements = 2;  // contains the weight measurements of the vehicle per axle
-
+    // Total number of axles on the vehicle
+    int32 axle_count = 1;
+    // Weight measurements for each axle
+    repeated WeightMeasurements weight_measurements = 2;
 }
 
+/*
+ * Individual axle weight measurement
+ * Each measurement includes axle number and weight value with unit
+ */
 message WeightMeasurements {
-  int32 axle = 1;             // indicating axle, counting starts from top of vehicle
-  MeasurementType weight = 2;
+    // Axle number (counting from front)
+    int32 axle = 1;
+    // Weight measurement with unit
+    MeasurementType weight = 2;
 }
 
+/*
+ * Dynamic event metadata for moving objects/events
+ * Used specifically for:
+ * - EMERGENCY_VEHICLE_APPROACHING
+ * - ROAD_INSPECTOR
+ * - GHOST_DRIVER_WARNING
+ */
 message DynamicEventMetadata {
-  MeasurementType event_speed = 1;
-  MeasurementType event_heading = 2;         // Heading of dynamic event in degrees
-
+    // Current speed of the dynamic event
+    MeasurementType event_speed = 1;
+    // Current heading of dynamic event in degrees [0,360)
+    MeasurementType event_heading = 2;
 }
 
-// Message adapted from Open Trip Model (OTM v5)
-// License plate information is omitted for privacy reasons
-// https://otm5.opentripmodel.org/
+/*
+ * Location update from vehicle to CSP
+ * Regular updates required:
+ * - Default: Every 5 seconds (0.2 Hz)
+ * - Dynamic: 1-60 seconds based on CSP request
+ * - Additional updates on significant speed changes (±15 km/h)
+ * 
+ * Based on Open Trip Model (OTM v5)
+ * License plate information omitted for privacy reasons
+ * https://otm5.opentripmodel.org/
+ */
 message LocationUpdateEvent {
-
-	enum GeoReferenceType {
-		GEOREFERENCETYPE_UNKNOWN = 0;
-		LAT_LON_POINT_GEO_REFERENCE = 1;  // only lat/lon positions are allowed in this interface, other OTM references are excluded
-	}
-
-	message GeoReference {
-		double lat = 1;
-		double lon = 2;
-		GeoReferenceType type = 3;
-	}
-
-    enum LifeCycle {
-        LIFECYCLE_UNKNOWN = 0;
-        ACTUAL = 1; // in this interface only actual updates are allowed
+    /*
+     * Supported geographic reference types
+     * Restricted subset of OTM reference types
+     * Only direct lat/lon coordinates allowed
+     */
+    enum GeoReferenceType {
+        GEOREFERENCETYPE_UNKNOWN = 0;
+        // Direct WGS84 coordinates, only supported type
+        LAT_LON_POINT_GEO_REFERENCE = 1;
     }
 
-    string id = 1;                                // Uniquely identifies this locationUpdateEvent.
-    google.protobuf.Timestamp creation_date = 2;  // should contain the timestamp of the GPS fix in UTC
-    GeoReference geo_reference = 3;
-    MeasurementType speed = 4;
-    MeasurementType heading = 5;
-    LifeCycle lifecycle = 6;                      // when is the action taking place. Only actual updates are allowed
-    google.protobuf.Timestamp device_date = 7;    // optional timestamp when the position update was received on the FMS device and can be used when the GPS fix seems to be far of the NTP time
-    float gps_quality = 8; 			  // deviation in meters with 95% probability
+    /*
+     * Geographic position reference
+     * Uses WGS84 coordinates (EPSG:4326)
+     * Precision requirements:
+     * - Lat/lon: 6+ decimal places
+     * - Updates: Every 1-60s based on CSP request
+     */
+    message GeoReference {
+        // Decimal degrees, range: -90 to +90
+        double lat = 1;
+        // Decimal degrees, range: -180 to +180
+        double lon = 2;
+        // Must be LAT_LON_POINT_GEO_REFERENCE
+        GeoReferenceType type = 3;
+    }
+
+    /*
+     * Location update lifecycle state
+     * OTM compatibility with restrictions:
+     * - Only ACTUAL updates allowed
+     * - Historical/future updates not supported
+     */
+    enum LifeCycle {
+        LIFECYCLE_UNKNOWN = 0;
+        // Current position update, only allowed value
+        ACTUAL = 1;
+    }
+
+    string id = 1;                               // Unique identifier for this update
+    google.protobuf.Timestamp creation_date = 2; // GPS fix timestamp (UTC)
+    GeoReference geo_reference = 3;              // Position coordinates
+    MeasurementType speed = 4;                   // Current speed with unit
+    MeasurementType heading = 5;                 // Current heading in degrees
+    LifeCycle lifecycle = 6;                     // Must be ACTUAL
+    // Optional device timestamp if GPS time significantly differs from NTP
+    google.protobuf.Timestamp device_date = 7;
+    // GPS position accuracy (95% confidence) in meters
+    // Required for iVRI priority use case
+    float gps_quality = 8;
 }
 
 /* 
-		Its Event codes
-*/
+ * ITS Event Codes
+ * Each event code maps to specific required data containers:
+ *
+ * Category 0: Special Messages (000-099)
+ * - UNKNOWN_ITS_EVENT_CODE (000):
+ *   No specific containers required
+ * - CHANGED_FREQUENCY_REQUEST (001):
+ *   Required: InfoContainer.desired_interval + Location with POLYGON type
+ *
+ * Category 1: Signaling and Speed (100-199)
+ * - MAXIMUM_SPEED (101):
+ *   Required: SpeedInfo.maximum_speed_limit
+ * - ADVISORY_SPEED_LIMIT (102):
+ *   Required: SpeedInfo.optimal_speed
+ * - OVERTAKING_BAN (103):
+ *   Required: OvertakingInfo
+ * - LANE_CONFIGURATION (104):
+ *   Required: RoadConfiguration + LaneInfo
+ *
+ * Category 2: Dangerous Situations (200-299)
+ * - All events require Location
+ * - WEATHER_CONDITIONS (207):
+ *   Required: WeatherConditions
+ * - Dynamic events (209,210,212):
+ *   Required: DynamicEventMetadata
+ *
+ * Category 3: Priority Systems (300-399)
+ * - PRIORITY (301):
+ *   Required: IvriContainer.priority_container
+ *
+ * Category 4: Traffic Light Info (400-499)
+ * - All require IvriContainer + LaneInfo
+ * - Specific container based on event type
+ *
+ * Category 5: Sensor Data (500-599)
+ * - Each maps to specific SensorInfo field:
+ *   501 -> tire_pressure
+ *   502 -> vehicle_height
+ *   503 -> vehicle_weight
+ */
 enum ItsEventCode {
+    /* Category 0: Special messages */
+    // Default unknown state
+    UNKNOWN_ITS_EVENT_CODE = 0;
+    // Request to change position update frequency (1-60 seconds)
+    CHANGED_FREQUENCY_REQUEST = 1;
 
     /* 
-		Category 0: Special messages
-	*/
-	// Unknown ITS event code
-    UNKNOWN_ITS_EVENT_CODE = 0;               
-	// Frequency requested to change to X Hz
-    CHANGED_FREQUENCY_REQUEST = 1;            
-
-	/* 
 		Category 1: Signaling and speed advice
 	*/
 	// Maximum allowed speed of x km/h
@@ -460,3 +923,741 @@ enum ItsEventCode {
     PARKING_OCCUPATION = 504;                 // Parking + loading/unloading area (occupation), placeholder
     PARKING_RESERVATION = 505;                // Parking + loading/unloading area (reservation), placeholder
 }
+
+/*
+ * WebSocket Connection Management
+ * 
+ * Connection Establishment:
+ * 1. Vehicle Registration
+ *    - REST API call to register vehicle
+ *    - Repeat every 24 hours to maintain registration
+ *    - Include iVRIPriorityEnabled if priority needed
+ *
+ * 2. Route Registration (if needed)
+ *    - REST API call to register route
+ *    - Required for iVRI priority use case
+ *    - Valid for 12 hours unless time-bounded
+ *
+ * 3. WebSocket Connection
+ *    - One connection per vehicle
+ *    - Bearer token authentication required
+ *    - TLS encryption mandatory 
+ *
+ * Connection Maintenance:
+ * - Activity Requirements:
+ *   - Location updates every 1-60s (based on CSP request)
+ *   - Timestamp responses within 3s
+ *   - Connection closes after 5min inactivity
+ *
+ * Reconnection Rules:
+ * - Within 24h: Only WebSocket reconnect needed
+ * - After 24h: Full registration process required
+ * 
+ * Error Handling:
+ * - Clock drift >3s: Triggers TIMEDIFF_TOO_BIG
+ * - Missing updates: Triggers DATA_RATE_ERROR
+ * - Failed validation: Various error types possible
+ */
+
+/*
+ * WebSocket Connection Recovery
+ *
+ * Disconnection Scenarios:
+ * 1. Brief Network Interruption (<5 min):
+ *    - Attempt immediate reconnection
+ *    - Resume with last known state
+ *    - No registration renewal needed
+ *
+ * 2. Extended Interruption (5 min - 24h):
+ *    - New WebSocket connection required
+ *    - Use existing vehicle/route registration
+ *    - Resume normal operation
+ *
+ * 3. Long-term Disconnection (>24h):
+ *    - Full re-registration required
+ *    - New vehicle announcement
+ *    - New route if priority needed
+ *    - New WebSocket connection
+ *
+ * Recovery Process:
+ * 1. Connection Lost:
+ *    - Stop sending updates
+ *    - Start reconnection timer
+ *    - Buffer critical events
+ *
+ * 2. Reconnection:
+ *    - Verify registration validity
+ *    - Establish new WebSocket if needed
+ *    - Resume location updates
+ *    - Process buffered events
+ *
+ * 3. Verification:
+ *    - Send location update
+ *    - Wait for timestamp request
+ *    - Verify clock synchronization
+ */
+
+/*
+ * Message Type Dependencies and Validation
+ *
+ * LocationUpdateEvent Dependencies:
+ * - Required for all active vehicles
+ * - Must include valid GeoReference
+ * - gps_quality required if iVRIPriorityEnabled
+ * - device_date optional, only for GPS/NTP mismatches
+ *
+ * Event Message Dependencies:
+ * EVENT_MESSAGE requires:
+ * 1. InfoContainer:
+ *    - author: Valid CSP identifier
+ *    - event_id: Unique within CSP scope
+ *    - message_type: Valid enum value
+ *    - event_version: ≥0
+ *    - creation_time: Valid UTC timestamp
+ *
+ * 2. ContentContainer:
+ *    - its_event_code: Valid enum value
+ *    - event_info: Required fields vary by code
+ *      See ItsEventCode documentation for details
+ *
+ * Priority Use Case Dependencies:
+ * - Vehicle registered with iVRIPriorityEnabled
+ * - Valid route registered via REST API
+ * - GPS quality within requirements
+ * - Location updates at required frequency
+ */
+
+/*
+ * ITS Event Code Field Requirements
+ *
+ * Each event code requires specific fields to be populated:
+ * 1. Traffic Light Events (4xx):
+ *    - TRAFFIC_LIGHT_STATUS:
+ *      - IvriContainer.traffic_light_state_information
+ *      - LaneInfo
+ *    - TRAFFIC_LIGHT_TIMING:
+ *      - IvriContainer.traffic_light_timing_information
+ *      - LaneInfo
+ *    - ADVISORY_SPEED:
+ *      - IvriContainer.traffic_light_speed_advice
+ *
+ * 2. Priority Events (3xx):
+ *    - PRIORITY:
+ *      - IvriContainer.priority_container.status
+ *      - IvriContainer.priority_container.maneuver
+ *      - LaneInfo
+ *
+ * 3. Dynamic Events (209,210,212):
+ *    - EMERGENCY_VEHICLE_APPROACHING:
+ *      - DynamicEventMetadata.event_speed
+ *      - DynamicEventMetadata.event_heading
+ *      - Location
+ *    - Similar for ROAD_INSPECTOR, GHOST_DRIVER_WARNING
+ *
+ * 4. Sensor Events (5xx):
+ *    - TIRE_PRESSURE_GAUGE:
+ *      - SensorInfo.tire_pressure
+ *    - ALTIMETER:
+ *      - SensorInfo.vehicle_height
+ *    - WEIGHT:
+ *      - SensorInfo.vehicle_weight
+ */
+
+/*
+ * Measurement Validation Requirements
+ *
+ * Speed Measurements:
+ * - Units: KILOMETERS_PER_HOUR or METERS_PER_SECOND
+ * - Value: > 0 for speed limits/advice
+ * - Update triggers: Changes > 15 km/h
+ * Used in:
+ * - LocationUpdateEvent.speed
+ * - SpeedInfo
+ * - DynamicEventMetadata.event_speed
+ *
+ * Weight Measurements:
+ * - Units: KILOGRAM or POUND
+ * - Value: > 0
+ * - Per axle in WeightMeasurements
+ * Used in:
+ * - VehicleWeight via SensorInfo
+ *
+ * Height Measurements:
+ * - Units: METER or CENTIMETER
+ * - Value: > 0
+ * Used in:
+ * - SensorInfo.vehicle_height
+ *
+ * Time Measurements:
+ * - Intervals: MILLISECOND to HOUR
+ * - Timestamps: Always UTC
+ * - Max clock drift: 3 seconds
+ * Used in:
+ * - All timestamp fields
+ * - InfoContainer.desired_interval
+ *
+ * Heading/Bearing:
+ * - Unit: DEGREES only
+ * - Range: [0, 360)
+ * - 0/360 = North, 90 = East
+ * Used in:
+ * - LocationUpdateEvent.heading
+ * - DynamicEventMetadata.event_heading
+ * - Location.heading
+ */
+
+/*
+ * Privacy and Security Considerations
+ *
+ * Data Protection:
+ * - Vehicle identifiers must not contain PII
+ * - License plate info deliberately excluded
+ * - Location history not retained
+ * - Timestamps always in UTC to avoid timezone leaks
+ *
+ * Authentication:
+ * - Bearer token required for all connections
+ * - Tokens must be kept secure
+ * - Tokens valid for max 24 hours
+ * - One token per vehicle recommended
+ *
+ * Transport Security:
+ * - TLS 1.3+ required for all connections
+ * - Certificate validation mandatory
+ * - No fallback to insecure transport
+ * - WebSocket over WSS only
+ *
+ * Message Validation:
+ * - All messages must be validated
+ * - Invalid messages trigger errors
+ * - No raw message forwarding
+ * - Size limits enforced
+ */
+
+/*
+ * Implementation Guidelines and Versioning
+ *
+ * Interface Versions:
+ * 2.x: Current supported version
+ * - 2.2: (Aug 2023) Comment reformatting
+ * - 2.1: (Apr 2023) Added GPS quality, heading enhancements
+ * - 2.0: (Mar 2023) Initial v2 release
+ * 1.x: Legacy support only
+ * - Migration to 2.x recommended
+ * - End of support: TBD
+ *
+ * Breaking Changes:
+ * - Major version increment required
+ * - Migration period provided
+ * - Backward compatibility where possible
+ * - CSP notification required
+ *
+ * Non-breaking Changes:
+ * - Minor version increment
+ * - Enum additions
+ * - Optional field additions
+ * - Documentation updates
+ *
+ * Implementation Requirements:
+ * - Full validation of all messages
+ * - Proper error handling
+ * - Secure token management
+ * - Clock synchronization
+ * - Proper UTF-8 encoding
+ * - Proper coordinate precision
+ *
+ * Testing Requirements:
+ * - Connection management
+ * - Message validation
+ * - Error handling
+ * - Time synchronization
+ * - Priority flow if used
+ * - Recovery procedures
+ */
+
+/*
+ * Testing Requirements and Certification
+ *
+ * Required Test Cases:
+ * 1. Connection Management:
+ *    - Initial connection flow
+ *    - Token authentication
+ *    - Inactivity timeout
+ *    - Reconnection scenarios
+ *    - Error recovery paths
+ *
+ * 2. Location Updates:
+ *    - GPS quality validation
+ *    - Update frequency compliance
+ *    - Speed change triggers
+ *    - Time synchronization
+ *    - Device time handling
+ *
+ * 3. Priority Management:
+ *    - Request/response flow
+ *    - Status transitions
+ *    - Multiple intersection handling
+ *    - Timeout scenarios
+ *    - GPS accuracy requirements
+ *
+ * 4. Message Validation:
+ *    - Field constraints
+ *    - Enum values
+ *    - Required fields
+ *    - Size limits
+ *    - UTF-8 encoding
+ *
+ * Testing Environment:
+ * - Test CSP endpoints available
+ * - Sample data provided
+ * - Error injection support
+ * - Performance monitoring
+ * - Logging capabilities
+ *
+ * Certification Process:
+ * 1. Documentation Review
+ * 2. Test Suite Execution
+ * 3. Performance Validation
+ * 4. Security Assessment
+ * 5. Final Certification
+ */
+
+/*
+ * Rate Limiting and Throttling
+ *
+ * Location Updates:
+ * - Minimum interval: 1 second
+ * - Maximum interval: 60 seconds
+ * - Default rate: 0.2 Hz (every 5 seconds)
+ * - Updates within 100ms are discarded
+ * - Extra updates on speed changes >15 km/h
+ *
+ * Dynamic Rate Areas:
+ * - CSP defines polygonal areas
+ * - Different rates per area possible
+ * - Area entry/exit triggers rate change
+ * - Areas defined via CHANGED_FREQUENCY_REQUEST
+ *
+ * Priority Use Cases:
+ * - 1 Hz required near traffic lights
+ * - Accuracy requirements stricter
+ * - Late updates may cancel priority
+ *
+ * Timestamp Requests:
+ * - CSP sends ~1/minute
+ * - Response required within 3s
+ * - Max clock drift: 3 seconds
+ * - Validation every request
+ *
+ * Error Rate Limits:
+ * - Max 10 errors/minute per vehicle
+ * - Excess errors may trigger disconnect
+ * - Buffer period after reconnect
+ */
+
+/*
+ * Backward Compatibility and Migration
+ *
+ * Version Lifecycle:
+ * 1. Version Announcement:
+ *    - 3 months notice for breaking changes
+ *    - Documentation of changes published
+ *    - Test environment made available
+ *
+ * 2. Transition Period:
+ *    - 6 months dual version support
+ *    - Both versions fully operational
+ *    - CSPs support both versions
+ *    - Time to migrate implementations
+ *
+ * 3. Version Deprecation:
+ *    - Announcement 3 months before
+ *    - Migration must be completed
+ *    - Old version support ends
+ *
+ * Migration Requirements:
+ * 1. Message Format Changes:
+ *    - Proto3 wire format compatibility
+ *    - Field numbers preserved
+ *    - New fields nullable/optional
+ *
+ * 2. Enum Changes:
+ *    - New values append only
+ *    - Old values retain meaning
+ *    - UNKNOWN default preserved
+ *
+ * 3. Behavioral Changes:
+ *    - Validation rules stricter only
+ *    - Old behavior subset of new
+ *    - Errors backward compatible
+ */
+
+/*
+ * Protocol Extensions and Extensibility
+ *
+ * Extension Mechanisms:
+ * 1. New Event Codes:
+ *    - Added to ItsEventCode enum
+ *    - Follow category grouping (0xx-5xx)
+ *    - Must define required fields
+ *    - Backward compatible addition
+ *
+ * 2. Container Extensions:
+ *    - Add new optional fields
+ *    - Keep existing field numbers
+ *    - Document dependencies
+ *    - Version in comments
+ *
+ * 3. Custom Extensions:
+ *    - CSP-specific features
+ *    - Use dedicated message types
+ *    - Document compatibility
+ *    - Optional implementation
+ *
+ * Implementation Guidelines:
+ * 1. Message Handling:
+ *    - Preserve unknown fields
+ *    - Skip unknown events
+ *    - Log extension usage
+ *    - Maintain compatibility
+ *
+ * 2. Version Detection:
+ *    - Check supported features
+ *    - Fallback mechanisms
+ *    - Graceful degradation
+ *    - Runtime adaptation
+ *
+ * 3. Documentation:
+ *    - Extension purpose
+ *    - Required changes
+ *    - Compatibility notes
+ *    - Example messages
+ */
+
+/*
+ * Message Size and Performance Requirements
+ *
+ * Size Limits:
+ * - Maximum message size: 1MB
+ * - Location updates: <1KB typical
+ * - Event messages: <10KB typical
+ * - Error messages: <100KB with raw data
+ * - Timestamps: <100 bytes typical
+ *
+ * Performance Targets:
+ * - Message encoding: <1ms
+ * - Message decoding: <1ms
+ * - Validation: <5ms
+ * - End-to-end latency: <100ms
+ * - Priority requests: <50ms processing
+ *
+ * Websocket Performance:
+ * - Max concurrent connections: 10000/CSP
+ * - Max message rate: 100/second/connection
+ * - Keep-alive interval: 30s recommended
+ * - Reconnection backoff: exponential
+ *
+ * Buffer Requirements:
+ * - Location updates: No buffering
+ * - Critical events: 5 minute buffer
+ * - Error messages: 1 minute buffer
+ * - Priority messages: No buffering
+ *
+ * Resource Usage:
+ * - Memory: <50MB/1000 connections
+ * - CPU: <10% single core/1000 connections
+ * - Network: <1Mbps/100 vehicles
+ * - Storage: Event logging optional
+ */
+
+/*
+ * Operational Monitoring and Logging
+ *
+ * Required Metrics:
+ * 1. Connection Health:
+ *    - Active connections per CSP
+ *    - Connection duration
+ *    - Reconnection frequency
+ *    - Authentication failures
+ *    - TLS handshake times
+ *
+ * 2. Message Statistics:
+ *    - Messages per second
+ *    - Message sizes
+ *    - Processing latency
+ *    - Error rates
+ *    - Queue depths
+ *
+ * 3. Location Updates:
+ *    - Update frequency
+ *    - GPS quality distribution
+ *    - Time sync status
+ *    - Missing update counts
+ *    - Speed change triggers
+ *
+ * 4. Priority Operations:
+ *    - Request success rate
+ *    - Processing time
+ *    - Status transitions
+ *    - GPS quality breaches
+ *    - Timeout incidents
+ *
+ * Logging Requirements:
+ * 1. Message Logs:
+ *    - Critical events
+ *    - Error conditions
+ *    - Auth failures
+ *    - Version changes
+ *
+ * 2. Retention:
+ *    - Critical events: 30 days
+ *    - Error logs: 7 days
+ *    - Performance metrics: 24 hours
+ *    - Raw messages: Optional
+ *
+ * 3. Log Format:
+ *    - UTC timestamps
+ *    - Correlation IDs
+ *    - Vehicle IDs
+ *    - Message types
+ *    - Error details
+ */
+
+/*
+ * Validation Patterns and Error Responses
+ *
+ * Field Validation:
+ * 1. Numeric Ranges:
+ *    - Latitude: [-90, 90]
+ *    - Longitude: [-180, 180]
+ *    - Heading: [0, 360)
+ *    - Speed: >0
+ *    - Weight: >0
+ *    - Height: >0
+ *    - GPS quality: >0
+ *    Response: INVALID_FIELD
+ *
+ * 2. String Fields:
+ *    - vehicle_id: [a-zA-Z0-9-_], max 64 chars
+ *    - author: [a-zA-Z0-9-_ ], max 128 chars
+ *    - event_id: UUID format
+ *    - event_text: UTF-8, max 1024 chars
+ *    Response: INVALID_FIELD
+ *
+ * 3. Timestamp Validation:
+ *    - Must be UTC
+ *    - No future timestamps (>1s)
+ *    - Max age: 60 seconds
+ *    - Clock drift: <3 seconds
+ *    Response: TIMEDIFF_TOO_BIG
+ *
+ * 4. Update Frequency:
+ *    - Min interval: 1 second
+ *    - Max interval: As requested (1-60s)
+ *    - Jitter tolerance: ±10%
+ *    Response: DATA_RATE_ERROR
+ *
+ * 5. Required Fields:
+ *    - Message-specific requirements
+ *    - Event code dependencies
+ *    - Contextual requirements
+ *    Response: MISSING_FIELD
+ *
+ * Error Response Format:
+ * {
+ *   error_type: <type>,
+ *   error_message: "Detailed description",
+ *   related_field: "Field causing error",
+ *   related_message: <original message>
+ * }
+ */
+
+/*
+ * Integration Testing and Certification
+ *
+ * Test Environment Setup:
+ * - Sandbox CSP environment available
+ * - Test vehicle identifiers provided
+ * - Simulated location data support
+ * - Error injection capabilities
+ * - Test tokens with short validity
+ *
+ * Required Integration Tests:
+ * 1. Registration Flow:
+ *    - Vehicle registration
+ *    - Route registration
+ *    - Token handling
+ *    - Registration renewal
+ *
+ * 2. Normal Operation:
+ *    - Location update stream
+ *    - Event reception
+ *    - Priority requests
+ *    - Time synchronization
+ *
+ * 3. Error Conditions:
+ *    - Network interruptions
+ *    - Invalid messages
+ *    - Token expiration
+ *    - Clock drift
+ *    - Rate limiting
+ *
+ * 4. Performance Testing:
+ *    - Message throughput
+ *    - Connection scaling
+ *    - Memory usage
+ *    - CPU utilization
+ *
+ * Certification Checklist:
+ * 1. Documentation:
+ *    - API usage examples
+ *    - Error handling
+ *    - Timeout values
+ *    - Retry strategies
+ *
+ * 2. Testing Evidence:
+ *    - Test results
+ *    - Error logs
+ *    - Performance metrics
+ *    - Security review
+ *
+ * 3. Implementation Review:
+ *    - Code quality
+ *    - Best practices
+ *    - Security measures
+ *    - Scalability considerations
+ */
+
+/*
+ * REST API Integration Requirements
+ * 
+ * Vehicle Registration:
+ * - Required before WebSocket connection
+ * - POST /api/v2/vehicles
+ * - Fields:
+ *   - vehicleId: Unique identifier
+ *   - iVRIPriorityEnabled: Boolean
+ *   - vehicleType: HGV/BUS/EMERGENCY
+ *   - maxSpeed: Km/h
+ *   - maxWeight: Kg
+ *   - maxHeight: m
+ *
+ * Route Registration:
+ * - Required for priority use cases
+ * - POST /api/v2/routes
+ * - Fields:
+ *   - vehicleId: Registered vehicle
+ *   - waypoints: Array of coordinates
+ *   - validUntil: UTC timestamp
+ *   - priorityLevel: 1-10
+ *
+ * Authentication Flow:
+ * 1. API Registration:
+ *    - Obtain API credentials
+ *    - Generate bearer token
+ *    - 24-hour validity
+ *
+ * 2. WebSocket Auth:
+ *    - Use bearer token
+ *    - Token in connection header
+ *    - Per-vehicle connection
+ *
+ * Error Responses:
+ * - 400: Invalid request
+ * - 401: Authentication failed
+ * - 403: Not authorized
+ * - 404: Resource not found
+ * - 409: Conflict/duplicate
+ * - 429: Rate limited
+ */
+
+/*
+ * Data Retention and Compliance Requirements
+ *
+ * Storage Requirements:
+ * 1. Time-Limited Data:
+ *    - Location updates: No persistent storage
+ *    - Event messages: Max 30 days
+ *    - Error logs: 7 days
+ *    - Authentication logs: 90 days
+ *
+ * 2. Audit Requirements:
+ *    - Priority requests: 30 days
+ *    - System changes: 90 days
+ *    - Security events: 1 year
+ *    - Version changes: 1 year
+ *
+ * 3. Data Minimization:
+ *    - No PII collection
+ *    - No route history
+ *    - No persistent vehicle tracking
+ *    - Minimal diagnostic data
+ *
+ * GDPR Compliance:
+ * 1. Data Categories:
+ *    - Vehicle identifiers: Technical
+ *    - Location data: Transient
+ *    - Event data: Business need
+ *    - Error data: Technical
+ *
+ * 2. Data Subject Rights:
+ *    - No personal data stored
+ *    - Technical IDs not linkable
+ *    - Automatic data expiry
+ *    - No subject access needed
+ *
+ * 3. Processing Records:
+ *    - Purpose definition
+ *    - Retention periods
+ *    - Security measures
+ *    - Access controls
+ */
+
+/*
+ * Error Status Transitions and Recovery
+ *
+ * Priority Flow Errors:
+ * 1. Request -> NoAnswer:
+ *    - After 3s without response
+ *    - Recovery: Auto-retry once
+ *    - Then: Manual re-request needed
+ *
+ * 2. Processing -> Rejected:
+ *    - Higher priority request exists
+ *    - Traffic conditions unsafe
+ *    - Recovery: Wait min 30s
+ *    - Then: Can request again
+ *
+ * 3. Granted -> MaxPresence:
+ *    - Vehicle exceeds time window
+ *    - Recovery: Leave intersection
+ *    - Then: 5-minute cooldown
+ *
+ * Time Sync Flow:
+ * 1. Normal -> TimeDiffTooBig:
+ *    - Clock drift exceeds 3s
+ *    - Recovery: NTP sync required
+ *    - Monitor: Until drift <1s
+ *
+ * 2. Normal -> NoTimestampAnswer:
+ *    - Response timeout (3s)
+ *    - Recovery: Check connectivity
+ *    - Then: Wait for next request
+ *
+ * Location Update Flow:
+ * 1. Normal -> DataRateError:
+ *    - Updates too slow/fast
+ *    - Recovery: Adjust GPS polling
+ *    - Monitor: Next 5 updates
+ *
+ * WebSocket Flow:
+ * 1. Connected -> Inactive:
+ *    - No activity for 5 minutes
+ *    - Recovery: New connection
+ *    - Then: Resume updates
+ *
+ * 2. Active -> TokenExpired:
+ *    - After 24 hours
+ *    - Recovery: New registration
+ *    - Then: Full reconnect
+ */
